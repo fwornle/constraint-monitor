@@ -1,38 +1,40 @@
-import { LLMService } from '@rapid/llm-proxy';
 import { logger, PerformanceTimer } from '../utils/logger.js';
 
 /**
  * Configurable Semantic Constraint Validator
  *
- * Delegates LLM calls to the unified LLMService from @rapid/llm-proxy.
- * Keeps domain logic: prompt building, response parsing, constraint routing.
+ * Sends each validation to the rapid-llm-proxy daemon's `/api/complete` as
+ * process `constraint-monitor`; the daemon's `bg-constraint-monitor` route
+ * picks the model, and the daemon owns fallback and token accounting.
+ * Keeps domain logic: prompt building, response parsing, result caching.
  *
  * Usage:
  *   const validator = new SemanticValidator(config);
  *   const result = await validator.validateConstraint(constraintId, regexMatch, context);
  */
+
+const PROCESS_TAG = 'constraint-monitor';
+const REQUEST_TIMEOUT_MS = 30000;
+
+/** Same precedence as every other proxy client in coding (see CLAUDE.md). */
+function resolveProxyCompleteUrl() {
+  const base = process.env.RAPID_LLM_PROXY_URL
+    ?? process.env.LLM_CLI_PROXY_URL
+    ?? process.env.LLM_PROXY_URL
+    ?? `http://localhost:${process.env.LLM_CLI_PROXY_PORT ?? '12435'}`;
+  return base.endsWith('/api/complete') ? base : `${base.replace(/\/+$/, '')}/api/complete`;
+}
+
 export class SemanticValidator {
   constructor(config = {}) {
     this.config = config;
 
-    // Model routing: maps constraint IDs to provider/model specs
-    // Format: 'provider/model-name'
-    this.modelRouting = config.modelRouting || {
-      // Code structure analysis - use fast Groq models
-      'no-evolutionary-names': 'groq/llama-3.3-70b-versatile',
-      'no-parallel-files': 'groq/llama-3.3-70b-versatile',
-
-      // Security analysis - use Anthropic for best safety understanding
-      'no-hardcoded-secrets': 'anthropic/claude-haiku-4-5',
-      'no-eval-usage': 'anthropic/claude-haiku-4-5',
-
-      // Language/intent analysis - balanced models
-      'debug-not-speculate': 'groq/llama-3.3-70b-versatile',
-      'proper-error-handling': 'gemini/gemini-2.5-flash',
-
-      // Default fallback
-      'default': 'groq/llama-3.3-70b-versatile'
-    };
+    // Result cache: the same match in the same context gets the same verdict
+    this.cache = new Map();
+    this.cacheMaxSize = config.cacheMaxSize || 1000;
+    this.cacheTTL = config.cacheTTL || 3600000;
+    this.cacheHits = 0;
+    this.cacheMisses = 0;
 
     // Performance tracking
     this.stats = {
@@ -41,24 +43,34 @@ export class SemanticValidator {
       byConstraint: {},
       averageLatency: 0
     };
-
-    // Initialize LLM service (with per-constraint model routing)
-    this.llmService = new LLMService({
-      modelRouting: this.modelRouting,
-      cache: { maxSize: config.cacheMaxSize || 1000, ttlMs: config.cacheTTL || 3600000 },
-      circuitBreaker: { threshold: 5, resetTimeoutMs: 60000 },
-    });
-    this.llmInitialized = false;
   }
 
   /**
-   * Ensure LLM service is initialized
+   * One completion from the proxy daemon. Throws on a non-2xx reply.
    */
-  async ensureInitialized() {
-    if (!this.llmInitialized) {
-      await this.llmService.initialize();
-      this.llmInitialized = true;
+  async complete(prompt) {
+    const response = await fetch(resolveProxyCompleteUrl(), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        process: PROCESS_TAG,
+        messages: [{ role: 'user', content: prompt }],
+        maxTokens: 200,
+        temperature: 0.1,
+        responseFormat: { type: 'json_object' },
+      }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    if (!response.ok) {
+      const text = await response.text().catch(() => '');
+      throw new Error(`proxy HTTP ${response.status}: ${text.slice(0, 300)}`);
     }
+    const data = await response.json();
+    return {
+      content: typeof data.content === 'string' ? data.content : '',
+      provider: data.provider || 'unknown',
+      model: data.model || 'unknown',
+    };
   }
 
   /**
@@ -73,21 +85,23 @@ export class SemanticValidator {
     const timer = new PerformanceTimer(`semantic-validation-${constraintId}`);
 
     try {
-      await this.ensureInitialized();
-
       this.stats.totalValidations++;
 
       const prompt = this.buildValidationPrompt(constraintId, regexMatch, context);
 
-      // Delegate to LLMService with per-constraint routing
-      const result = await this.llmService.completeWithRouting(prompt, constraintId, {
-        maxTokens: 200,
-        temperature: 0.1,
-        responseFormat: { type: 'json_object' },
-      });
+      const cached = this.cache.get(prompt);
+      if (cached && Date.now() - cached.at < this.cacheTTL) {
+        this.cacheHits++;
+        timer.end('cached');
+        return cached.result;
+      }
+      this.cacheMisses++;
+
+      const result = await this.complete(prompt);
 
       // Parse the LLM response
       const parsed = this.parseValidationResponse(result.content);
+      if (!parsed.fallback) this.remember(prompt, parsed);
 
       // Update stats
       const duration = timer.duration;
@@ -113,6 +127,16 @@ export class SemanticValidator {
       // Return fallback (accept regex match)
       return this.createFallbackResult(true);
     }
+  }
+
+  /**
+   * Cache a verdict, evicting the oldest entry when full
+   */
+  remember(prompt, result) {
+    if (this.cache.size >= this.cacheMaxSize) {
+      this.cache.delete(this.cache.keys().next().value);
+    }
+    this.cache.set(prompt, { result, at: Date.now() });
   }
 
   /**
@@ -184,13 +208,6 @@ Respond with JSON only:
   }
 
   /**
-   * Get model spec for a constraint
-   */
-  getModelForConstraint(constraintId) {
-    return this.modelRouting[constraintId] || this.modelRouting.default;
-  }
-
-  /**
    * Stats tracking
    */
   updateStats(provider, constraintId, duration) {
@@ -228,12 +245,15 @@ Respond with JSON only:
    * Get validation statistics
    */
   getStats() {
-    const llmStats = this.llmService.getStats();
+    const lookups = this.cacheHits + this.cacheMisses;
     return {
       ...this.stats,
-      cache: llmStats.cache,
-      providers: this.llmService.getAvailableProviders(),
-      circuitBreaker: llmStats.circuitBreaker
+      cache: {
+        size: this.cache.size,
+        hits: this.cacheHits,
+        misses: this.cacheMisses,
+        hitRate: lookups > 0 ? this.cacheHits / lookups : 0
+      }
     };
   }
 
@@ -241,7 +261,7 @@ Respond with JSON only:
    * Clear cache
    */
   clearCache() {
-    this.llmService.clearCache();
+    this.cache.clear();
     logger.info('Semantic validator cache cleared');
   }
 }
