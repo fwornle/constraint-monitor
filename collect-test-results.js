@@ -10,6 +10,7 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { repoHistoryDir } from '../../lib/history/paths.cjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -19,7 +20,7 @@ const __dirname = path.dirname(__filename);
 // But path.resolve with relative paths from __dirname doesn't work correctly
 // Instead, navigate up from the known location
 const CODING_REPO = path.resolve(__dirname, '../../');
-const LSL_DIR = path.join(CODING_REPO, '.specstory', 'history');
+const LSL_DIR = repoHistoryDir(CODING_REPO);
 const REPORT_FILE = path.join(__dirname, 'INTERACTIVE-TEST-REPORT.md');
 
 // Verify we found the right directory

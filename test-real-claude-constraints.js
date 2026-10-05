@@ -16,6 +16,7 @@ import { spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { createRequire } from 'module';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -38,7 +39,9 @@ class RealClaudeConstraintTester {
 
     // Derive coding root from this file's location (2 levels up from integrations/constraint-monitor)
     this.codingRepo = process.env.CODING_TOOLS_PATH || process.env.CODING_REPO || path.resolve(__dirname, '../..');
-    this.transcriptDir = path.join(this.codingRepo, '.specstory', 'history');
+    // Where coding's transcripts live (T9) — resolved by coding's own resolver.
+    const { repoHistoryDir } = createRequire(import.meta.url)(path.join(this.codingRepo, 'lib', 'history', 'paths.cjs'));
+    this.transcriptDir = repoHistoryDir(this.codingRepo);
     this.claudeCommand = path.join(this.codingRepo, 'bin', 'coding');
   }
 
@@ -568,7 +571,7 @@ ${result.transcriptEvidence?.promptFound ? '- ✅ Prompt found in transcript' : 
 **Evidence:**
 1. **Real Process Spawning:** Claude sessions spawned via \`spawn()\` with actual \`coding\` binary
 2. **Real Prompts:** All prompts issued to stdin of real Claude processes
-3. **Real Transcripts:** Evidence extracted from actual LSL files in \`.specstory/history/\`
+3. **Real Transcripts:** Evidence extracted from actual LSL files in \`.coding/history/\`
 4. **Real Reactions:** Claude's responses captured from stdout/stderr and transcript files
 
 **What this test does NOT do:**
