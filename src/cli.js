@@ -46,7 +46,7 @@ Notes:
     --file so piped content can still carry a path label for path-scoped rules.
   * 'check' exits 1 when it finds an error/critical violation, 0 otherwise,
     so it composes in shell gates:  constraints check --file x.ts || exit 1
-  * Rules live in $CODING_REPO/.constraint-monitor.yaml.
+  * Rules live in $CODING_REPO/config/constraints/constraint-monitor.yaml.
 `;
 
 function parseFlags(args) {

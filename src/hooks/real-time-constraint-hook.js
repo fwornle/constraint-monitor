@@ -10,7 +10,7 @@
  */
 
 import { readFileSync, existsSync } from 'fs';
-import { join, dirname } from 'path';
+import { join, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { execSync } from 'child_process';
 import { logger } from '../utils/logger.js';
@@ -27,11 +27,15 @@ class RealTimeConstraintEnforcer {
   }
 
   findConstraintConfig() {
-    // Look for project-specific config first, then global
+    // Look for project-specific config first, then global. The coding repo
+    // has no project-level file: its config IS the global one, kept under
+    // config/constraints/ so the container can mount the directory.
+    const codingRepo = process.env.CODING_REPO || '';
     const projectConfig = join(this.projectPath, '.constraint-monitor.yaml');
-    const globalConfig = join(process.env.CODING_REPO || '', '.constraint-monitor.yaml');
-    
-    if (existsSync(projectConfig)) {
+    const globalConfig = join(codingRepo, 'config', 'constraints', 'constraint-monitor.yaml');
+    const isCodingRepo = codingRepo && resolve(this.projectPath) === resolve(codingRepo);
+
+    if (!isCodingRepo && existsSync(projectConfig)) {
       return projectConfig;
     } else if (existsSync(globalConfig)) {
       return globalConfig;
