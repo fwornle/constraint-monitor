@@ -1,5 +1,5 @@
 import { readFileSync, existsSync, writeFileSync } from 'fs';
-import { join, dirname } from 'path';
+import { join, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { parse, stringify } from 'yaml';
 import { logger } from './logger.js';
@@ -118,10 +118,14 @@ export class ConfigManager {
   }
 
   /**
-   * Resolve the canonical .constraint-monitor.yaml location.
+   * Resolve the canonical constraint config location.
    *
    * Single source of truth: CONSTRAINT_CONFIG_PATH env var, else
-   * $CODING_REPO/.constraint-monitor.yaml. No cwd-walking, no fallbacks
+   * $CODING_REPO/config/constraints/constraint-monitor.yaml. It lives in its
+   * own directory so the container can bind-mount the DIRECTORY: a
+   * single-file bind mount keeps the old inode when the host replaces the
+   * file (git checkout), and the container then reads a deleted file.
+   * No cwd-walking, no fallbacks
    * to other config files — when the file is missing we want to fail
    * loudly, not silently load a different (stale) constraint set.
    *
@@ -142,11 +146,11 @@ export class ConfigManager {
 
     const codingRepo = process.env.CODING_REPO;
     if (codingRepo) {
-      const path = join(codingRepo, '.constraint-monitor.yaml');
+      const path = join(codingRepo, 'config', 'constraints', 'constraint-monitor.yaml');
       if (!existsSync(path)) {
         throw new Error(
           `CODING_REPO=${codingRepo} but ${path} does not exist. ` +
-          `The constraint-monitor needs a single canonical .constraint-monitor.yaml — ` +
+          `The constraint-monitor needs a single canonical config/constraints/constraint-monitor.yaml — ` +
           `create the file or set CONSTRAINT_CONFIG_PATH explicitly.`
         );
       }
@@ -154,6 +158,20 @@ export class ConfigManager {
     }
 
     return null;
+  }
+
+  /**
+   * Per-project config path. Other repos keep theirs at
+   * <project>/.constraint-monitor.yaml; the coding repo's own config IS the
+   * canonical one, which lives under config/constraints/ — without this, the
+   * first per-project read for coding would write a root copy that shadows it.
+   */
+  projectConfigPathFor(projectPath) {
+    const codingRepo = process.env.CODING_REPO;
+    if (codingRepo && resolve(projectPath) === resolve(codingRepo)) {
+      return this.findProjectConfig();
+    }
+    return join(projectPath, '.constraint-monitor.yaml');
   }
 
   /**
@@ -165,7 +183,7 @@ export class ConfigManager {
     if (!configPath) {
       throw new Error(
         'No constraint config found. Set CONSTRAINT_CONFIG_PATH or CODING_REPO ' +
-        'so the manager can locate .constraint-monitor.yaml.'
+        'so the manager can locate config/constraints/constraint-monitor.yaml.'
       );
     }
     const content = readFileSync(configPath, 'utf8');
@@ -184,7 +202,7 @@ export class ConfigManager {
     if (!configPath) {
       throw new Error(
         'No constraint config found. Set CONSTRAINT_CONFIG_PATH or CODING_REPO ' +
-        'so the manager can locate .constraint-monitor.yaml.'
+        'so the manager can locate config/constraints/constraint-monitor.yaml.'
       );
     }
 
@@ -252,7 +270,7 @@ export class ConfigManager {
     if (!configPath) {
       throw new Error(
         'No constraint config found. Set CONSTRAINT_CONFIG_PATH or CODING_REPO ' +
-        'so the manager can locate .constraint-monitor.yaml.'
+        'so the manager can locate config/constraints/constraint-monitor.yaml.'
       );
     }
     const content = readFileSync(configPath, 'utf8');
@@ -302,7 +320,7 @@ export class ConfigManager {
     if (!configPath) {
       throw new Error(
         'No constraint config found. Set CONSTRAINT_CONFIG_PATH or CODING_REPO ' +
-        'so the manager can locate .constraint-monitor.yaml.'
+        'so the manager can locate config/constraints/constraint-monitor.yaml.'
       );
     }
     const content = readFileSync(configPath, 'utf8');
@@ -369,7 +387,7 @@ export class ConfigManager {
     }
 
     // Look for project-specific configuration
-    const projectConfigPath = join(projectPath, '.constraint-monitor.yaml');
+    const projectConfigPath = this.projectConfigPathFor(projectPath);
     
     if (existsSync(projectConfigPath)) {
       try {
@@ -392,7 +410,7 @@ export class ConfigManager {
       return this.getConstraintGroups();
     }
 
-    const projectConfigPath = join(projectPath, '.constraint-monitor.yaml');
+    const projectConfigPath = this.projectConfigPathFor(projectPath);
     
     if (existsSync(projectConfigPath)) {
       try {
@@ -459,7 +477,7 @@ export class ConfigManager {
     };
 
     // Save to project-specific file
-    const projectConfigPath = join(projectPath, '.constraint-monitor.yaml');
+    const projectConfigPath = this.projectConfigPathFor(projectPath);
     
     try {
       const yamlContent = stringify(projectConfig, {
@@ -485,7 +503,7 @@ export class ConfigManager {
       return false;
     }
 
-    const projectConfigPath = join(projectPath, '.constraint-monitor.yaml');
+    const projectConfigPath = this.projectConfigPathFor(projectPath);
     
     // Ensure project config exists
     if (!existsSync(projectConfigPath)) {

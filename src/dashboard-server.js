@@ -624,7 +624,7 @@ class DashboardServer {
             const { execSync } = await import('child_process');
             const testScript = join(__dirname, 'config/load-constraints.js');
             const configPath = process.env.CONSTRAINT_CONFIG_PATH ||
-                               join(__dirname, '../../../.constraint-monitor.yaml');
+                               join(__dirname, '../../../config/constraints/constraint-monitor.yaml');
 
             // Test 1: Config loads successfully (catches stdout/stderr bugs)
             let configLoaded = false;
