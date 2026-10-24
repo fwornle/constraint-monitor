@@ -10,7 +10,7 @@
  */
 
 import { readFileSync, existsSync } from 'fs';
-import { join, dirname } from 'path';
+import { join, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { execSync } from 'child_process';
 import { logger } from '../utils/logger.js';
@@ -27,11 +27,15 @@ class RealTimeConstraintEnforcer {
   }
 
   findConstraintConfig() {
-    // Look for project-specific config first, then global
+    // Look for project-specific config first, then global. The coding repo
+    // has no project-level file: its config IS the global one, kept under
+    // config/constraints/ so the container can mount the directory.
+    const codingRepo = process.env.CODING_REPO || '';
     const projectConfig = join(this.projectPath, '.constraint-monitor.yaml');
-    const globalConfig = join(process.env.CODING_REPO || '', '.constraint-monitor.yaml');
-    
-    if (existsSync(projectConfig)) {
+    const globalConfig = join(codingRepo, 'config', 'constraints', 'constraint-monitor.yaml');
+    const isCodingRepo = codingRepo && resolve(this.projectPath) === resolve(codingRepo);
+
+    if (!isCodingRepo && existsSync(projectConfig)) {
       return projectConfig;
     } else if (existsSync(globalConfig)) {
       return globalConfig;
@@ -94,15 +98,21 @@ class RealTimeConstraintEnforcer {
           const constraintConfig = constraintEngine.constraints?.get(violation.constraint_id);
 
           if (constraintConfig) {
-            // Check tool_filter - if specified, only apply to listed tools
+            // Check tool_filter - if specified, only apply to listed tools.
+            // A user prompt has no toolName, so a tool-scoped rule never applies to it
+            // (pasted terminal output tripped no-ascii-art-in-docs on its ─── separators).
             if (constraintConfig.tool_filter && Array.isArray(constraintConfig.tool_filter)) {
-              if (context.toolName && !constraintConfig.tool_filter.includes(context.toolName)) {
+              if (!context.toolName || !constraintConfig.tool_filter.includes(context.toolName)) {
                 logger.debug(`✅ Skipping ${violation.constraint_id} - tool ${context.toolName} not in tool_filter`);
                 return false; // Filter out this violation
               }
             }
 
-            // Check file_pattern - if specified, only apply to matching files
+            // Check file_pattern - if specified, only apply to matching files.
+            // A prompt is not a file, so a file-scoped rule never applies to it.
+            if (constraintConfig.file_pattern && type === 'prompt') {
+              return false;
+            }
             if (constraintConfig.file_pattern && context.filePath) {
               try {
                 const fileRegex = new RegExp(constraintConfig.file_pattern);
