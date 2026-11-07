@@ -14,10 +14,13 @@
  *
  * Overrides and skill activations come from the session transcript (see
  * session-transcript.js), never from files or tool parameters the agent can
- * write.
+ * write. In the agent box (CODING_GUARD_MODE=box, set by the managed hook
+ * command) the transcript grants NO override: only a grant the user signed
+ * on the host counts (box-grants.js), and a blocked call files the request.
  */
 
 import { readTranscriptTail, overridesFromTranscript, activeSkillsFromTranscript } from './session-transcript.js';
+import { boxGuardConfig, settleWithGrants } from './box-grants.js';
 
 /** Tools that cannot change anything; allowed even when the guard is broken. */
 const READ_ONLY_TOOLS = new Set(['Read', 'Grep', 'Glob', 'LS', 'ToolSearch', 'TodoWrite']);
@@ -27,6 +30,9 @@ const GUARD_BROKEN_HINT =
   'Do not try to work around the guard. Report this error to the user.\n' +
   'The user can bypass it for one turn with OVERRIDE_CONSTRAINT: guard-error in their prompt, ' +
   'or start a session with CODING_FEATURE_CONSTRAINTS=off.';
+
+/** In the box the bypass for a broken guard is a grant for this pseudo-rule. */
+const GUARD_ERROR_RULE = 'guard-error';
 
 async function readStdin() {
   if (process.stdin.isTTY === true) return '';
@@ -70,8 +76,16 @@ async function processToolHook() {
     block(`🔴 Constraint guard could not identify the tool call (tool_name=${toolName}) — blocked (fail-closed).`);
   }
 
+  const box = boxGuardConfig();
   const entries = readTranscriptTail(hookInput.transcript_path);
-  const constraintOverride = overridesFromTranscript(entries);
+  const constraintOverride = box ? [] : overridesFromTranscript(entries);
+
+  /** Box: allow when signed grants cover every rule, else block with the request link. */
+  const settleInBox = async (rules, message) => {
+    const verdict = await settleWithGrants({ rules, toolName, params: toolParams, config: box });
+    if (verdict.allow) process.exit(0);
+    block(`${message}\n\n${verdict.message}`);
+  };
 
   try {
     const { preToolHook } = await import('./real-time-constraint-hook.js');
@@ -85,6 +99,7 @@ async function processToolHook() {
       toolName,
       project: detectProject(toolParams),
       constraintOverride,
+      boxMode: box !== null,
       activeSkills: activeSkillsFromTranscript(entries),
     };
 
@@ -93,14 +108,17 @@ async function processToolHook() {
     block(`❌ Tool ${toolName} blocked by constraints`);
   } catch (error) {
     if (error.message?.includes('CONSTRAINT VIOLATION')) {
+      if (box && error.rules?.length) await settleInBox(error.rules, error.message);
       block(error.message);
     }
-    if (READ_ONLY_TOOLS.has(toolName) || constraintOverride.includes('guard-error')) {
+    if (READ_ONLY_TOOLS.has(toolName) || constraintOverride.includes(GUARD_ERROR_RULE)) {
       console.error(`⚠️ Constraint guard error (allowed: ${READ_ONLY_TOOLS.has(toolName) ? 'read-only tool' : 'user override'}): ${error.message}`);
       process.exit(0);
     }
+    if (box) await settleInBox([GUARD_ERROR_RULE], `🔴 Constraint guard error: ${error.message}\nThe guard failed, so this call is blocked (fail-closed). Report this error to the user.`);
     block(`🔴 Constraint guard error: ${error.message}\n${GUARD_BROKEN_HINT}`);
   }
 }
 
-processToolHook();
+// An escaped rejection would exit 1, which Claude Code treats as "allow".
+processToolHook().catch((error) => block(`🔴 Constraint guard error: ${error?.message ?? error}\n${boxGuardConfig() ? 'Blocked (fail-closed). Report this error to the user.' : GUARD_BROKEN_HINT}`));
