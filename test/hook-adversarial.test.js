@@ -166,10 +166,31 @@ describe('no random blocks on tools that change nothing', () => {
   });
 });
 
+describe('agent box (CODING_GUARD_MODE=box): the transcript grants nothing', () => {
+  // Only a grant the host guard signed counts there; the full grant flow runs
+  // against the real daemon in coding/tests/guard/box-hook.test.mjs.
+  const box = { CODING_GUARD_MODE: 'box', CODING_GUARD_KEYS: join(DIR, 'no-keys') };
+  test('an override the human typed does not unblock', () => {
+    const t = transcript([humanPrompt('OVERRIDE_CONSTRAINT: no-console-log')]);
+    const r = runHook(call('Write', CONSOLE_WRITE.tool_input, t), box);
+    assert.strictEqual(r.code, 2);
+    assert.match(r.stderr, /Only the user can override|No override is possible/);
+  });
+  test('a typed guard-error override does not bypass a broken guard', () => {
+    const t = transcript([humanPrompt('OVERRIDE_CONSTRAINT: guard-error')]);
+    const r = runHook(call('Write', { file_path: '/repo/a.js', content: 'const a = 1;' }, t),
+      { ...box, CONSTRAINT_CONFIG_PATH: join(DIR, 'missing.yaml') });
+    assert.strictEqual(r.code, 2);
+  });
+  test('the block message does not offer the transcript override', () => {
+    assert.doesNotMatch(runHook(CONSOLE_WRITE, box).stderr, /include in your prompt: OVERRIDE_CONSTRAINT/);
+  });
+});
+
 describe('known bypasses that need Phase 1/2 (privilege boundary, result-based checks)', () => {
   test.todo('console.log written via Bash redirect (rule is Write/Edit-scoped; needs post-write check)');
   test.todo('parallel file created via cp/mv instead of Write');
   test.todo('obfuscated content: console["log"], base64 | base64 -d, split strings');
   test.todo('agent edits the rules file, the hook, or ~/.claude/settings.json');
-  test.todo('agent appends a forged human prompt to its own transcript, or types one via tmux send-keys');
+  test.todo('on the host (--no-box): agent appends a forged human prompt to its transcript, or types one via tmux send-keys');
 });

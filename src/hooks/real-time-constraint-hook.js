@@ -151,7 +151,7 @@ class RealTimeConstraintEnforcer {
     return blockingLevels.includes(violation.severity);
   }
 
-  formatViolationMessage(violations, constraintOverride = null) {
+  formatViolationMessage(violations, constraintOverride = null, { boxMode = false } = {}) {
     const blockingViolations = violations.filter(v => this.shouldBlockViolation(v, constraintOverride));
 
     // Check if any violations were overridden
@@ -191,7 +191,8 @@ class RealTimeConstraintEnforcer {
     });
 
     lines.push('Please modify your request to comply with these constraints and try again.');
-    lines.push('To override a constraint, include in your prompt: OVERRIDE_CONSTRAINT: <constraint-id>');
+    // In the agent box only a signed grant overrides; the wrapper says how.
+    if (!boxMode) lines.push('To override a constraint, include in your prompt: OVERRIDE_CONSTRAINT: <constraint-id>');
     lines.push('');
     lines.push('📊 View detailed constraint information: http://localhost:3030');
 
@@ -252,14 +253,19 @@ class RealTimeConstraintEnforcer {
     }
 
     // Pass constraint override from context to violation formatting
-    const blockingMessage = this.formatViolationMessage(checkResult.violations || [], context.constraintOverride);
+    const blockingMessage = this.formatViolationMessage(checkResult.violations || [], context.constraintOverride,
+      { boxMode: context.boxMode === true });
 
     if (blockingMessage) {
+      const rules = (checkResult.violations || [])
+        .filter(v => this.shouldBlockViolation(v, context.constraintOverride))
+        .map(v => v.constraint_id);
       return {
         allowed: false,
         reason: 'constraint_violation',
         message: blockingMessage,
-        violations: checkResult.violations
+        violations: checkResult.violations,
+        rules: [...new Set(rules)]
       };
     }
 
@@ -323,13 +329,16 @@ const enforcer = new RealTimeConstraintEnforcer();
 
 /**
  * Pre-tool hook: called before any tool execution. Throws a
- * "CONSTRAINT VIOLATION" error to block; any other error propagates so the
- * wrapper can fail closed instead of silently allowing the call.
+ * "CONSTRAINT VIOLATION" error to block — carrying the blocking rule ids in
+ * `error.rules`, which the box looks up in signed grants; any other error
+ * propagates so the wrapper can fail closed instead of silently allowing the call.
  */
 export async function preToolHook(toolCall, context = {}) {
   const result = await enforcer.enforceToolConstraints(toolCall, context);
   if (!result.allowed) {
-    throw new Error(result.message);
+    const error = new Error(result.message);
+    error.rules = result.rules;
+    throw error;
   }
   return { continue: true, compliance: result.compliance };
 }
