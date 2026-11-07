@@ -129,8 +129,13 @@ export class ConfigManager {
    * to other config files — when the file is missing we want to fail
    * loudly, not silently load a different (stale) constraint set.
    *
-   * Returns the resolved absolute path, or null only if neither env var
-   * is set and no caller-provided default exists.
+   * Without either env var, the path is derived from this file's own
+   * location when the monitor is installed as the coding repo's submodule
+   * (<coding>/integrations/constraint-monitor/src/utils). A `claude` started
+   * without bin/coding has no CODING_REPO, and the hook used to treat that as
+   * "no config" and allow everything.
+   *
+   * Returns the resolved absolute path, or null when nothing is found.
    */
   findProjectConfig() {
     const explicit = process.env.CONSTRAINT_CONFIG_PATH;
@@ -155,6 +160,11 @@ export class ConfigManager {
         );
       }
       return path;
+    }
+
+    const installed = resolve(dirname(fileURLToPath(import.meta.url)), '../../../../config/constraints/constraint-monitor.yaml');
+    if (existsSync(installed)) {
+      return installed;
     }
 
     return null;

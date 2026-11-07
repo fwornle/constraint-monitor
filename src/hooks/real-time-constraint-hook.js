@@ -3,76 +3,45 @@
 /**
  * Real-Time Constraint Enforcement Hook
  * 
- * This hook intercepts every user prompt and tool call to check for constraint violations
+ * This hook intercepts every tool call to check for constraint violations
  * BEFORE execution. If violations are detected, it blocks execution and requires correction.
  * 
  * Usage: Called by Claude Code hook system on every interaction
  */
 
-import { readFileSync, existsSync } from 'fs';
-import { join, dirname, resolve } from 'path';
+import { dirname, basename } from 'path';
 import { fileURLToPath } from 'url';
-import { execSync } from 'child_process';
 import { logger } from '../utils/logger.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
+/**
+ * Tools whose input IS content that lands somewhere (a file body, a shell
+ * command). A rule without a tool_filter applies to these only. Applying
+ * rules to the serialized input of every other tool (Read paths, Agent
+ * prompts, sub-agent hand-backs) produced blocks on calls that change
+ * nothing, which reads as random and trains agents to rephrase until a call
+ * gets through.
+ */
+export const CONTENT_TOOLS = ['Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'Bash'];
+
 class RealTimeConstraintEnforcer {
   constructor() {
-    this.projectPath = process.env.PWD || process.cwd();
-    this.constraintConfigPath = this.findConstraintConfig();
-    this.config = this.loadConfig();
-    // Direct constraint engine integration - no HTTP calls needed
+    this.config = null;
   }
 
-  findConstraintConfig() {
-    // Look for project-specific config first, then global. The coding repo
-    // has no project-level file: its config IS the global one, kept under
-    // config/constraints/ so the container can mount the directory.
-    const codingRepo = process.env.CODING_REPO || '';
-    const projectConfig = join(this.projectPath, '.constraint-monitor.yaml');
-    const globalConfig = join(codingRepo, 'config', 'constraints', 'constraint-monitor.yaml');
-    const isCodingRepo = codingRepo && resolve(this.projectPath) === resolve(codingRepo);
-
-    if (!isCodingRepo && existsSync(projectConfig)) {
-      return projectConfig;
-    } else if (existsSync(globalConfig)) {
-      return globalConfig;
-    }
-    return null;
-  }
-
-  loadConfig() {
-    if (!this.constraintConfigPath) {
-      return { enforcement: { enabled: false } };
-    }
-
-    try {
-      // Use the existing constraint engine to load config
-      const configScript = join(__dirname, '../config/load-constraints.js');
-      const result = execSync(`node "${configScript}" "${this.constraintConfigPath}"`, {
-        encoding: 'utf8',
-        timeout: 3000
-      });
-      const config = JSON.parse(result);
-
-      // Add default enforcement settings if not present
-      if (!config.enforcement) {
-        config.enforcement = {
-          enabled: true,
-          blocking_levels: ['critical', 'error'],
-          warning_levels: ['warning'],
-          info_levels: ['info'],
-          fail_open: true
-        };
-      }
-
-      return config;
-    } catch (error) {
-      logger.error('⚠️ Failed to load constraint config:', error.message);
-      return { enforcement: { enabled: false } };
-    }
+  /**
+   * Enforcement settings come from the canonical rules file only (the same
+   * file the rules come from). A project-level .constraint-monitor.yaml used
+   * to be able to set enforcement.enabled:false for its repo. Any failure
+   * here throws, and the hook wrapper blocks (fail-closed).
+   */
+  async loadConfig() {
+    if (this.config) return this.config;
+    const { ConfigManager } = await import('../utils/config-manager.js');
+    this.config = { enforcement: new ConfigManager().getEnforcementSettings() };
+    return this.config;
   }
 
   async checkConstraintsDirectly(content, type, context = {}) {
@@ -83,7 +52,7 @@ class RealTimeConstraintEnforcer {
 
       const configManager = new ConfigManager();
       const constraintEngine = new ConstraintEngine(configManager);
-      await constraintEngine.initialize();
+      await constraintEngine.initialize({ databases: false });
 
       const result = await constraintEngine.checkConstraints({
         content,
@@ -106,6 +75,8 @@ class RealTimeConstraintEnforcer {
                 logger.debug(`✅ Skipping ${violation.constraint_id} - tool ${context.toolName} not in tool_filter`);
                 return false; // Filter out this violation
               }
+            } else if (type === 'tool_call' && !CONTENT_TOOLS.includes(context.toolName)) {
+              return false; // unscoped rules apply to content-writing tools only
             }
 
             // Check file_pattern - if specified, only apply to matching files.
@@ -158,8 +129,7 @@ class RealTimeConstraintEnforcer {
   }
 
   getProjectName() {
-    const segments = this.projectPath.split('/');
-    return segments[segments.length - 1] || 'unknown';
+    return basename(process.cwd()) || 'unknown';
   }
 
   shouldBlockViolation(violation, constraintOverride = null) {
@@ -228,33 +198,8 @@ class RealTimeConstraintEnforcer {
     return lines.join('\n');
   }
 
-  async enforcePromptConstraints(prompt, context = {}) {
-    if (!this.config.enforcement?.enabled) {
-      return { allowed: true };
-    }
-
-    const checkResult = await this.checkConstraintsDirectly(prompt, 'prompt', context);
-
-    // Log ALL violations to dashboard BEFORE deciding whether to block
-    if (checkResult.violations && checkResult.violations.length > 0) {
-      await this.logViolationsToStorage(checkResult.violations, context, 'prompt');
-    }
-
-    const blockingMessage = this.formatViolationMessage(checkResult.violations || []);
-
-    if (blockingMessage) {
-      return {
-        allowed: false,
-        reason: 'constraint_violation',
-        message: blockingMessage,
-        violations: checkResult.violations
-      };
-    }
-
-    return { allowed: true, compliance: checkResult.compliance };
-  }
-
   async enforceToolConstraints(toolCall, context = {}) {
+    await this.loadConfig();
     if (!this.config.enforcement?.enabled) {
       return { allowed: true };
     }
@@ -280,28 +225,22 @@ class RealTimeConstraintEnforcer {
       if (params.file_path) {
         contentToCheck += '\n' + params.file_path;
       }
+    } else if (toolCall.name === 'NotebookEdit') {
+      contentToCheck = (params.new_source || '') + '\n' + (params.notebook_path || '');
     } else if (toolCall.name === 'Bash') {
-      // SPECIAL CASE: For Bash tool calls, extract just the command for constraint checking
-      // This allows command-specific constraints like no-ukb-bash-command to work properly
+      // The command only. The description is narration that never executes,
+      // and checking it blocked calls for how they were described.
       contentToCheck = params.command || params.script || '';
-      // Also include description for context
-      if (params.description) {
-        contentToCheck += '\n// ' + params.description;
-      }
     } else {
-      // For other tools, serialize the entire call
-      contentToCheck = JSON.stringify({
-        tool: toolCall.name,
-        parameters: params,
-        context: context
-      }, null, 2);
+      // Other tools: only rules that name the tool in tool_filter apply.
+      contentToCheck = JSON.stringify(params, null, 2);
     }
 
     // CRITICAL: Add file path and tool name to context so constraint engine can filter properly
     // Also pass activeSkills from context so skill-required constraints can be skipped if skill is active
     const contextWithFilePath = {
       ...context,
-      filePath: params.file_path,
+      filePath: params.file_path || params.notebook_path,
       toolName: toolCall.name,
       activeSkills: context.activeSkills || {}
     };
@@ -332,7 +271,7 @@ class RealTimeConstraintEnforcer {
       const { readFileSync, writeFileSync } = await import('fs');
       const path = await import('path');
       // Derive coding root from this file's location (5 levels up from src/hooks/)
-      const codingRoot = process.env.CODING_TOOLS_PATH || process.env.CODING_REPO || path.resolve(__dirname, '../../../../..');
+      const codingRoot = process.env.CODING_TOOLS_PATH || process.env.CODING_REPO || path.resolve(__dirname, '../../../..');
       const violationStoragePath = path.join(codingRoot, '.mcp-sync', 'violation-history.json');
 
       // Read existing violations
@@ -383,72 +322,25 @@ class RealTimeConstraintEnforcer {
 const enforcer = new RealTimeConstraintEnforcer();
 
 /**
- * Pre-prompt hook: Called before Claude processes any user prompt
- */
-export async function prePromptHook(prompt, context = {}) {
-  try {
-    const result = await enforcer.enforcePromptConstraints(prompt, context);
-    
-    if (!result.allowed) {
-      // Block execution by throwing an error with the violation message
-      throw new Error(result.message);
-    }
-    
-    return { continue: true, compliance: result.compliance };
-  } catch (error) {
-    if (error.message.includes('CONSTRAINT VIOLATION')) {
-      throw error; // Re-throw constraint violations to block execution
-    }
-    
-    // Log other errors but don't block
-    logger.error('⚠️ Constraint hook error:', error.message);
-    return { continue: true };
-  }
-}
-
-/**
- * Pre-tool hook: Called before any tool execution
+ * Pre-tool hook: called before any tool execution. Throws a
+ * "CONSTRAINT VIOLATION" error to block; any other error propagates so the
+ * wrapper can fail closed instead of silently allowing the call.
  */
 export async function preToolHook(toolCall, context = {}) {
-  try {
-    const result = await enforcer.enforceToolConstraints(toolCall, context);
-    
-    if (!result.allowed) {
-      // Block tool execution by throwing an error
-      throw new Error(result.message);
-    }
-    
-    return { continue: true, compliance: result.compliance };
-  } catch (error) {
-    if (error.message.includes('CONSTRAINT VIOLATION')) {
-      throw error; // Re-throw constraint violations to block execution
-    }
-    
-    // Log other errors but don't block
-    logger.error('⚠️ Tool constraint hook error:', error.message);
-    return { continue: true };
+  const result = await enforcer.enforceToolConstraints(toolCall, context);
+  if (!result.allowed) {
+    throw new Error(result.message);
   }
+  return { continue: true, compliance: result.compliance };
 }
 
 // CLI support for testing
 if (import.meta.url === `file://${process.argv[1]}`) {
-  const [,, action, content] = process.argv;
-  
-  if (action === 'test-prompt') {
-    const testPrompt = content || 'console.error("test")';
-    prePromptHook(testPrompt).then(result => {
-      console.error('Prompt check result:', result);
-    }).catch(error => {
-      console.error('Prompt blocked:', error.message);
-    });
-  } else if (action === 'test-tool') {
-    const testTool = { name: 'Write', parameters: { content: 'var x = 1;' } };
-    preToolHook(testTool).then(result => {
-      console.error('Tool check result:', result);
-    }).catch(error => {
-      console.error('Tool blocked:', error.message);
-    });
-  } else {
-    console.error('Usage: node real-time-constraint-hook.js [test-prompt|test-tool] [content]');
-  }
+  const [,, content] = process.argv;
+  const testTool = { name: 'Write', parameters: { file_path: '/tmp/x.js', content: content || 'var x = 1;' } };
+  preToolHook(testTool, { toolName: 'Write' }).then(result => {
+    console.error('Tool check result:', result);
+  }).catch(error => {
+    console.error('Tool blocked:', error.message);
+  });
 }

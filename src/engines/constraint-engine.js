@@ -14,7 +14,14 @@ export class ConstraintEngine {
     this.fileWatcher = null;
   }
 
-  async initialize() {
+  /**
+   * @param {object} [options]
+   * @param {boolean} [options.databases=true] - connect Qdrant + analytics.
+   *   The PreToolUse hook passes false: a regex check needs neither, and a
+   *   hung Qdrant (300 s client timeout) outlived the hook and let the call
+   *   through unchecked.
+   */
+  async initialize({ databases = true } = {}) {
     try {
       // Import ConfigManager if not provided in constructor
       if (!this.configManager) {
@@ -25,6 +32,11 @@ export class ConstraintEngine {
       // Load constraints from YAML configuration
       await this.loadConstraintsFromConfig();
       
+      if (!databases) {
+        logger.info('Constraint Engine initialized with', this.constraints.size, 'constraints (no databases)');
+        return;
+      }
+
       // Initialize databases if available
       try {
         this.qdrant = new QdrantDatabase();
@@ -145,7 +157,10 @@ export class ConstraintEngine {
         const regex = new RegExp(pattern, flags);
 
         // Check if constraint should apply to file path only (not content)
-        const targetText = constraint.applies_to === 'file_path' ? (filePath || '') : content;
+        // 'filename' is an older spelling of 'file_path' still used in the rules file;
+        // treating it as content made path rules match file bodies instead.
+        const pathOnly = constraint.applies_to === 'file_path' || constraint.applies_to === 'filename';
+        const targetText = pathOnly ? (filePath || '') : content;
         const matches = targetText.match(regex);
 
         logger.debug(`Testing constraint ${id}`, {
@@ -186,15 +201,21 @@ export class ConstraintEngine {
 
         return null;
       } catch (error) {
+        // A rule that cannot be evaluated is a broken guard, not a pass.
         logger.error(`Error checking constraint ${id}:`, error);
-        return null;
+        throw new Error(`constraint '${id}' could not be evaluated: ${error.message}`);
       }
     });
 
     // Wait for all constraint checks to complete in parallel
     const results = await Promise.allSettled(constraintChecks);
 
-    // Extract violations from settled promises (filter out nulls and rejected promises)
+    const broken = results.filter(result => result.status === 'rejected');
+    if (broken.length > 0) {
+      throw new Error(broken.map(result => result.reason.message).join('; '));
+    }
+
+    // Extract violations from settled promises (filter out nulls)
     const violations = results
       .filter(result => result.status === 'fulfilled' && result.value !== null)
       .map(result => result.value);
