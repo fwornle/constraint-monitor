@@ -79,16 +79,6 @@ if [[ ! -f "$CLAUDE_SETTINGS" ]]; then
     "ask": []
   },
   "hooks": {
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node CODING_REPO/integrations/constraint-monitor/src/hooks/pre-prompt-hook-wrapper.js"
-          }
-        ]
-      }
-    ],
     "PreToolUse": [
       {
         "hooks": [
@@ -108,23 +98,13 @@ EOF
     echo "✅ Created settings.local.json with constraint monitor hooks"
 else
     # Settings file exists - check if hooks are already configured
-    if grep -q "pre-prompt-hook-wrapper.js" "$CLAUDE_SETTINGS" 2>/dev/null; then
+    if grep -q "pre-tool-hook-wrapper.js" "$CLAUDE_SETTINGS" 2>/dev/null; then
         echo "✅ Constraint monitor hooks already configured"
     else
         echo "⚠️  Settings file exists but hooks are not configured"
         echo "   Please manually add hooks to: $CLAUDE_SETTINGS"
         echo ""
         echo "   Add this to the 'hooks' section:"
-        echo '   "UserPromptSubmit": ['
-        echo '     {'
-        echo '       "hooks": ['
-        echo '         {'
-        echo '           "type": "command",'
-        echo "           \"command\": \"node $CODING_REPO/integrations/constraint-monitor/src/hooks/pre-prompt-hook-wrapper.js\""
-        echo '         }'
-        echo '       ]'
-        echo '     }'
-        echo '   ],'
         echo '   "PreToolUse": ['
         echo '     {'
         echo '       "hooks": ['

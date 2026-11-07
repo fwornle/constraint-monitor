@@ -50,9 +50,15 @@ describe('ConstraintEngine - Core Functionality', () => {
         description: 'enhanced suffix'
       },
       {
-        content: 'const userServiceTemp = () => { }',
+        content: 'const userServiceTemporary = () => { }',
         shouldMatch: true,
-        description: 'temp suffix'
+        description: 'temporary suffix'
+      },
+      {
+        // Ordinary vocabulary as a camelCase suffix is not an evolutionary name.
+        content: 'const isNew = true;',
+        shouldMatch: false,
+        description: 'ordinary vocabulary suffix'
       },
       {
         content: 'class UserService { }',
@@ -152,12 +158,12 @@ describe('ConstraintEngine - Core Functionality', () => {
   test('should detect speculative debugging language', async () => {
     const testCases = [
       {
-        content: 'console.log("might be a race condition");',
+        content: 'console.log("might be a race condition issue");',
         shouldMatch: true,
         description: 'might speculation'
       },
       {
-        content: '// probably caused by async timing',
+        content: '// probably an async timing bug',
         shouldMatch: true,
         description: 'probably speculation'
       },
@@ -237,7 +243,7 @@ describe('ConstraintEngine - Parallel Execution', () => {
   test('should handle concurrent constraint checks independently', async () => {
     const tests = [
       { content: 'class TestV2 {}', filePath: 'file1.js' },
-      { content: 'const key = "sk-123"', filePath: 'file2.js' },
+      { content: 'const apiKey = "sk-1234567890"', filePath: 'file2.js' },
       { content: 'var x = 1;', filePath: 'file3.js' }
     ];
 
