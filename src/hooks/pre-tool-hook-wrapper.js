@@ -21,6 +21,7 @@
 
 import { readTranscriptTail, overridesFromTranscript, activeSkillsFromTranscript } from './session-transcript.js';
 import { boxGuardConfig, settleWithGrants } from './box-grants.js';
+import { toClaudeCall } from './agent-adapters.js';
 
 /** Tools that cannot change anything; allowed even when the guard is broken. */
 const READ_ONLY_TOOLS = new Set(['Read', 'Grep', 'Glob', 'LS', 'ToolSearch', 'TodoWrite']);
@@ -69,9 +70,15 @@ async function processToolHook() {
     block('🔴 Constraint guard received unparseable hook input — blocked (fail-closed).');
   }
 
-  // Claude Code passes tool parameters in "tool_input" (docs/CLAUDE-CODE-HOOK-FORMAT.md)
-  const toolName = hookInput.tool_name;
-  const toolParams = hookInput.tool_input;
+  // Claude Code passes tool parameters in "tool_input" (docs/CLAUDE-CODE-HOOK-FORMAT.md).
+  // Other agents' guard plugins send their native call; CODING_GUARD_AGENT is
+  // set inline by that plugin's command, never taken from the agent's env.
+  const agent = process.env.CODING_GUARD_AGENT || hookInput.agent || 'claude';
+  const call = agent === 'claude'
+    ? { tool_name: hookInput.tool_name, tool_input: hookInput.tool_input }
+    : toClaudeCall(agent, hookInput.tool_name, hookInput.tool_input, hookInput.cwd || process.cwd());
+  const toolName = call.tool_name;
+  const toolParams = call.tool_input;
   if (!toolName || !toolParams || typeof toolParams !== 'object') {
     block(`🔴 Constraint guard could not identify the tool call (tool_name=${toolName}) — blocked (fail-closed).`);
   }
@@ -82,7 +89,7 @@ async function processToolHook() {
 
   /** Box: allow when signed grants cover every rule, else block with the request link. */
   const settleInBox = async (rules, message) => {
-    const verdict = await settleWithGrants({ rules, toolName, params: toolParams, config: box });
+    const verdict = await settleWithGrants({ rules, toolName, params: toolParams, config: box, agent });
     if (verdict.allow) process.exit(0);
     block(`${message}\n\n${verdict.message}`);
   };
