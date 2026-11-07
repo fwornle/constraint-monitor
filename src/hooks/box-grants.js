@@ -125,8 +125,8 @@ export async function openGuard({ keysDir, session = hostname(), fetchImpl = fet
       return { uncovered, used };
     },
     /** Ask the user. Returns the pending request (the daemon reuses an open one). */
-    async request({ rule, tool, file, excerpt, reason }) {
-      const { status, data } = await http('POST', '/requests', { rule, session, agent: 'claude', tool, file, excerpt, reason });
+    async request({ rule, agent = 'claude', tool, file, excerpt, reason }) {
+      const { status, data } = await http('POST', '/requests', { rule, session, agent, tool, file, excerpt, reason });
       if (status === 201 || status === 200) return data.request;
       throw new GuardUnavailable(`host guard refused the override request (${status}: ${data.error ?? 'no detail'})`);
     },
@@ -138,7 +138,7 @@ export async function openGuard({ keysDir, session = hostname(), fetchImpl = fet
  * { allow: true } or { allow: false, message } — the message is shown to the
  * agent, which must relay the approval link to the user.
  */
-export async function settleWithGrants({ rules, toolName, params, config, guardOptions = {} }) {
+export async function settleWithGrants({ rules, toolName, params, config, agent = 'claude', guardOptions = {} }) {
   const file = callFile(params);
   let guard;
   try {
@@ -148,7 +148,7 @@ export async function settleWithGrants({ rules, toolName, params, config, guardO
     const requests = [];
     for (const rule of uncovered) {
       requests.push(await guard.request({
-        rule, tool: toolName, file, excerpt: callExcerpt(toolName, params), reason: params.description ?? null,
+        rule, agent, tool: toolName, file, excerpt: callExcerpt(toolName, params), reason: params.description ?? null,
       }));
     }
     return {
