@@ -19,6 +19,7 @@
  * on the host counts (box-grants.js), and a blocked call files the request.
  */
 
+import { writeSync } from 'fs';
 import { readTranscriptTail, overridesFromTranscript, activeSkillsFromTranscript } from './session-transcript.js';
 import { boxGuardConfig, settleWithGrants } from './box-grants.js';
 import { toClaudeCall } from './agent-adapters.js';
@@ -42,7 +43,26 @@ async function readStdin() {
   return Buffer.concat(chunks).toString('utf8').trim();
 }
 
+/**
+ * Block the call. Claude Code shows stderr of an exit-2 hook to the model.
+ * Copilot does not: for exit 2 it shows only "hook exited with code 2", so the
+ * rule and the approval link would be lost — it takes the reason from a JSON
+ * deny on stdout with exit 0 instead (any other failure of the hook still
+ * denies there).
+ */
+const COPILOT = process.env.CODING_GUARD_AGENT === 'copilot';
+// Copilot ALLOWS when stdout is not exactly the decision JSON, so a stray
+// log line before it would turn a block into an allow. Everything else this
+// process prints goes to stderr; only block() writes to fd 1.
+if (COPILOT) process.stdout.write = (chunk, encoding, cb) => process.stderr.write(chunk, encoding, cb);
+
 function block(message) {
+  if (COPILOT) {
+    writeSync(1, JSON.stringify({
+      hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: message },
+    }));
+    process.exit(0);
+  }
   console.error(message);
   process.exit(2);
 }
