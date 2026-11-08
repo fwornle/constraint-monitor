@@ -23,6 +23,7 @@ import { writeSync } from 'fs';
 import { readTranscriptTail, overridesFromTranscript, activeSkillsFromTranscript } from './session-transcript.js';
 import { boxGuardConfig, recordBoxCall, settleWithGrants } from './box-grants.js';
 import { toClaudeCall } from './agent-adapters.js';
+import { resultCheckEnabled } from './result-check.js';
 
 /** Tools that cannot change anything; allowed even when the guard is broken. */
 const READ_ONLY_TOOLS = new Set(['Read', 'Grep', 'Glob', 'LS', 'ToolSearch', 'TodoWrite']);
@@ -108,10 +109,47 @@ async function processToolHook() {
   const entries = readTranscriptTail(hookInput.transcript_path);
   const constraintOverride = box ? [] : overridesFromTranscript(entries);
 
+  const context = {
+    timestamp: Date.now(),
+    source: 'claude-code-tool-hook',
+    workingDirectory: hookInput.cwd || process.cwd(),
+    sessionId: hookInput.session_id || 'unknown',
+    toolName,
+    project: detectProject(toolParams),
+    constraintOverride,
+    boxMode: box !== null,
+    activeSkills: activeSkillsFromTranscript(entries),
+  };
+
+  /**
+   * The call is allowed by the rules. Before it runs: judge what earlier calls
+   * left on disk (result-check.js) and register this one, so its own result
+   * is judged after it. Anything undone blocks this call, so the agent hears
+   * about it; a failure of the check blocks too (fail-closed).
+   */
+  const allow = async ({ checkResults = true } = {}) => {
+    if (checkResults && resultCheckEnabled() && !READ_ONLY_TOOLS.has(toolName)) {
+      const { beforeCall } = await import('./result-check.js');
+      const { getEnforcer } = await import('./real-time-constraint-hook.js');
+      const { undone, notices } = await beforeCall({
+        cwd: context.workingDirectory, key: hookInput.tool_use_id, toolName, params: toolParams,
+        enforcer: getEnforcer(), context,
+        settleGrant: box ? (rules, file, content) => settleWithGrants({ rules, toolName: 'Write', params: { file_path: file, content }, config: box, agent }) : null,
+      });
+      if (undone.length || notices.length) {
+        const { formatUndone } = await import('./result-check.js');
+        block([...notices, formatUndone(undone)].filter(Boolean).join('\n\n') +
+          '\n\nThis call was not run, so you see the above first. Repeat it if it is still needed.');
+      }
+    }
+    process.exit(0);
+  };
+
   /** Box: allow when signed grants cover every rule, else block with the request link. */
   const settleInBox = async (rules, message) => {
     const verdict = await settleWithGrants({ rules, toolName, params: toolParams, config: box, agent });
-    if (verdict.allow) process.exit(0);
+    // A grant for a broken guard also lets the call past a broken result check.
+    if (verdict.allow) await allow({ checkResults: !rules.includes(GUARD_ERROR_RULE) });
     block(`${message}\n\n${verdict.message}`);
   };
 
@@ -119,20 +157,8 @@ async function processToolHook() {
     const { preToolHook } = await import('./real-time-constraint-hook.js');
 
     const toolCall = { name: toolName, parameters: toolParams, input: toolParams };
-    const context = {
-      timestamp: Date.now(),
-      source: 'claude-code-tool-hook',
-      workingDirectory: hookInput.cwd || process.cwd(),
-      sessionId: hookInput.session_id || 'unknown',
-      toolName,
-      project: detectProject(toolParams),
-      constraintOverride,
-      boxMode: box !== null,
-      activeSkills: activeSkillsFromTranscript(entries),
-    };
-
     const result = await preToolHook(toolCall, context);
-    if (result.continue) process.exit(0);
+    if (result.continue) await allow();
     block(`❌ Tool ${toolName} blocked by constraints`);
   } catch (error) {
     if (error.message?.includes('CONSTRAINT VIOLATION')) {

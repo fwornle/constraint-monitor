@@ -187,10 +187,10 @@ describe('agent box (CODING_GUARD_MODE=box): the transcript grants nothing', () 
   });
 });
 
-describe('known bypasses that need Phase 1/2 (privilege boundary, result-based checks)', () => {
-  test.todo('console.log written via Bash redirect (rule is Write/Edit-scoped; needs post-write check)');
-  test.todo('parallel file created via cp/mv instead of Write');
-  test.todo('obfuscated content: console["log"], base64 | base64 -d, split strings');
+// Bash redirect, cp/mv, base64 and generated content are closed by the result
+// check (Phase 2), which judges the files a call leaves: test/result-check.test.js.
+describe('known bypasses still open (privilege boundary, AST rules)', () => {
+  test.todo('obfuscated code the regex cannot see: console["log"], split identifiers (needs the eslint AST rule)');
   test.todo('agent edits the rules file, the hook, or ~/.claude/settings.json');
   test.todo('on the host (--no-box): agent appends a forged human prompt to its transcript, or types one via tmux send-keys');
 });
