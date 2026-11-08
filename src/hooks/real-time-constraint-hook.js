@@ -44,15 +44,22 @@ class RealTimeConstraintEnforcer {
     return this.config;
   }
 
+  /** One engine per process: the result check evaluates several files per call. */
+  async getEngine() {
+    if (!this.engine) {
+      const { ConstraintEngine } = await import('../engines/constraint-engine.js');
+      const { ConfigManager } = await import('../utils/config-manager.js');
+      const engine = new ConstraintEngine(new ConfigManager());
+      await engine.initialize({ databases: false });
+      this.engine = engine;
+    }
+    return this.engine;
+  }
+
   async checkConstraintsDirectly(content, type, context = {}) {
     try {
       // Use the constraint engine directly instead of HTTP API calls
-      const { ConstraintEngine } = await import('../engines/constraint-engine.js');
-      const { ConfigManager } = await import('../utils/config-manager.js');
-
-      const configManager = new ConfigManager();
-      const constraintEngine = new ConstraintEngine(configManager);
-      await constraintEngine.initialize({ databases: false });
+      const constraintEngine = await this.getEngine();
 
       const result = await constraintEngine.checkConstraints({
         content,
@@ -326,6 +333,11 @@ class RealTimeConstraintEnforcer {
 
 // Hook entry points for Claude Code integration
 const enforcer = new RealTimeConstraintEnforcer();
+
+/** The shared enforcer (result-check.js judges files on disk with the same rules). */
+export function getEnforcer() {
+  return enforcer;
+}
 
 /**
  * Pre-tool hook: called before any tool execution. Throws a
