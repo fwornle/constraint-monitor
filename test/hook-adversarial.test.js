@@ -189,8 +189,53 @@ describe('agent box (CODING_GUARD_MODE=box): the transcript grants nothing', () 
 
 // Bash redirect, cp/mv, base64 and generated content are closed by the result
 // check (Phase 2), which judges the files a call leaves: test/result-check.test.js.
-describe('known bypasses still open (privilege boundary, AST rules)', () => {
-  test.todo('obfuscated code the regex cannot see: console["log"], split identifiers (needs the eslint AST rule)');
+describe('obfuscated code the regex cannot see is judged on the parsed file (ast: rules)', () => {
+  const src = (name, content) => {
+    const file = join(DIR, name);
+    writeFileSync(file, content);
+    return file;
+  };
+  const write = (content, name = 'w.js') => call('Write', { file_path: join(DIR, name), content });
+
+  test('Write: computed, aliased and destructured console.log are blocked', () => {
+    for (const code of ['console["log"]("x");', 'const c = console; c.log("x");', 'const { log } = console; log("x");']) {
+      const r = runHook(write(code));
+      assert.strictEqual(r.code, 2, code);
+      assert.match(r.stderr, /no-console-log/);
+      assert.match(r.stderr, /Found in the parsed code/);
+    }
+  });
+  test('Write: eval by another name and an unbound empty catch are blocked', () => {
+    assert.match(runHook(write('globalThis["ev" + "al"]("1");')).stderr, /no-eval-usage/);
+    assert.match(runHook(write('new Function("return 1")();')).stderr, /no-eval-usage/);
+    assert.match(runHook(write('try { a(); } catch {}')).stderr, /proper-error-handling/);
+  });
+  test('Edit: the fragment is judged inside the file it produces', () => {
+    const file = src('e.js', 'const c = console;\nexport const f = () => 1;\n');
+    const r = runHook(call('Edit', { file_path: file, old_string: '() => 1', new_string: '() => c.log(1)' }));
+    assert.strictEqual(r.code, 2);
+    assert.match(r.stderr, /no-console-log/);
+  });
+  test('MultiEdit: edits applied in order, then judged', () => {
+    const file = src('m.js', 'export const a = 1;\nexport const b = 2;\n');
+    const r = runHook(call('MultiEdit', { file_path: file, edits: [
+      { old_string: 'a = 1', new_string: 'k = "lo" + "g"' },
+      { old_string: 'b = 2', new_string: 'b = console[k]' },
+    ] }));
+    assert.strictEqual(r.code, 2);
+  });
+  test('Edit: a violation already in the file does not block an unrelated edit', () => {
+    const file = src('old.js', 'console["log"]("legacy");\nexport const a = 1;\n');
+    assert.strictEqual(runHook(call('Edit', { file_path: file, old_string: 'a = 1', new_string: 'a = 2' })).code, 0);
+  });
+  test('clean code still passes, also code that merely mentions the names', () => {
+    // (A method named eval, `model.eval()`, is not counted by the AST check but
+    // still hits the regex `\beval\s*\(` — the rule takes the larger count.)
+    assert.strictEqual(runHook(write('logger.log("x"); const o = { eval: 1 }; try { a(); } catch { /* best effort */ }')).code, 0);
+  });
+});
+
+describe('known bypasses still open (privilege boundary)', () => {
   test.todo('agent edits the rules file, the hook, or ~/.claude/settings.json');
   test.todo('on the host (--no-box): agent appends a forged human prompt to its transcript, or types one via tmux send-keys');
 });
