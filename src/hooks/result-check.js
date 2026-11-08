@@ -206,7 +206,7 @@ export async function rulesAddedBy({ enforcer, absPath, before, after, context =
   if (!config.enforcement?.enabled) return [];
   const judge = async (text) => {
     const res = await enforcer.checkConstraintsDirectly(`${text}\n${absPath}`, 'tool_call', {
-      filePath: absPath, toolName: 'Write', activeSkills: context.activeSkills || {},
+      filePath: absPath, toolName: 'Write', activeSkills: context.activeSkills || {}, fileText: text,
     });
     return (res.violations || []).filter((v) => enforcer.shouldBlockViolation(v, context.constraintOverride));
   };

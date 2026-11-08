@@ -143,6 +143,12 @@ describe('the shell bypasses of the per-call check (hook-adversarial todos) are 
     assert.ok(!fs.existsSync(path.join(ws.root, 'NOTES.md')));
   });
 
+  test('obfuscated console.log written by the shell (judged on the parsed file)', async () => {
+    const ws = repo();
+    await callRun(ws, sh(ws.root, `mkdir -p src && printf '%s\\n' 'const c = console; c["lo" + "g"]("x");' > src/app.js`));
+    assert.ok(!fs.existsSync(path.join(ws.root, 'src', 'app.js')));
+  });
+
   test('a script the agent wrote and then ran', async () => {
     const ws = repo();
     await callRun(ws, sh(ws.root, `printf '%s\\n' "require('fs').writeFileSync('NOTES.md', 'Upd' + 'ated in 2025.')" > /tmp/w-${process.pid}.js && node /tmp/w-${process.pid}.js`));

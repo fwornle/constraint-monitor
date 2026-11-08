@@ -9,11 +9,54 @@
  * Usage: Called by Claude Code hook system on every interaction
  */
 
+import { readFileSync } from 'fs';
 import { dirname, basename } from 'path';
 import { fileURLToPath } from 'url';
 import { logger } from '../utils/logger.js';
 
 const __filename = fileURLToPath(import.meta.url);
+
+const MAX_PARSE_BYTES = 1_000_000;
+
+/**
+ * The target file before and after an Edit / MultiEdit, so `ast:` rules can
+ * count what the edit ADDS to a parsed file (a fragment is not a program).
+ * Null when it cannot be worked out — an old_string not in the file means the
+ * edit fails anyway; the regex still judges the fragment.
+ */
+export function editedFile(toolName, params) {
+  if (!['Edit', 'MultiEdit'].includes(toolName) || typeof params?.file_path !== 'string') return null;
+  let before;
+  try {
+    before = readFileSync(params.file_path, 'utf8');
+  } catch (err) {
+    if (err.code !== 'ENOENT') return null;
+    before = '';
+  }
+  if (before.length > MAX_PARSE_BYTES) return null;
+  const edits = toolName === 'MultiEdit'
+    ? (Array.isArray(params.edits) ? params.edits : [])
+    : [{ old_string: params.old_string, new_string: params.new_string, replace_all: params.replace_all }];
+  let after = before;
+  for (const e of edits) {
+    const from = typeof e?.old_string === 'string' ? e.old_string : '';
+    const to = typeof e?.new_string === 'string' ? e.new_string : '';
+    if (from === '') {
+      if (after !== '') return null;
+      after = to;
+      continue;
+    }
+    if (!after.includes(from)) return null;
+    after = e.replace_all ? after.split(from).join(to) : after.replace(from, () => to);
+  }
+  return { before, after };
+}
+
+function wholeFile(toolName, params) {
+  if (toolName === 'Write') return typeof params.content === 'string' ? { fileText: params.content } : {};
+  const edited = editedFile(toolName, params);
+  return edited ? { fileText: edited.after, fileTextBefore: edited.before } : {};
+}
 const __dirname = dirname(__filename);
 
 /**
@@ -64,7 +107,10 @@ class RealTimeConstraintEnforcer {
       const result = await constraintEngine.checkConstraints({
         content,
         type,
-        filePath: context.filePath
+        filePath: context.filePath,
+        // The whole file, when the caller has it: `ast:` rules parse it.
+        fileText: context.fileText,
+        fileTextBefore: context.fileTextBefore,
       });
 
       // Filter violations based on tool_filter and file_pattern from constraint config
@@ -191,7 +237,9 @@ class RealTimeConstraintEnforcer {
       if (violation.suggestion) {
         lines.push(`   💡 Suggestion: ${violation.suggestion}`);
       }
-      if (violation.pattern) {
+      if (violation.detected_by === 'ast') {
+        lines.push(`   🔍 Found in the parsed code (\`${violation.ast}\` check) — a computed, aliased or destructured form the pattern \`${violation.pattern}\` does not spell out`);
+      } else if (violation.pattern) {
         lines.push(`   🔍 Pattern: \`${violation.pattern}\``);
       }
       lines.push('');
@@ -249,6 +297,9 @@ class RealTimeConstraintEnforcer {
     const contextWithFilePath = {
       ...context,
       filePath: params.file_path || params.notebook_path,
+      // `ast:` rules parse whole files: a Write's content, or the file an
+      // Edit / MultiEdit would leave (counting only what the edit adds).
+      ...wholeFile(toolCall.name, params),
       toolName: toolCall.name,
       activeSkills: context.activeSkills || {}
     };

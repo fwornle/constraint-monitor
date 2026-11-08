@@ -3,6 +3,7 @@ import { QdrantDatabase } from '../databases/qdrant-client.js';
 import { DuckDBAnalytics } from '../databases/duckdb-client.js';
 import fs from 'fs';
 import path from 'path';
+import { countAst } from './ast-rules.js';
 
 export class ConstraintEngine {
   constructor(configManager) {
@@ -104,8 +105,23 @@ export class ConstraintEngine {
 
 
   async checkConstraints(options) {
-    const { content, type, filePath } = options;
+    // fileText: the WHOLE file when the caller has it (a Write, or the result
+    // check reading the file back). Rules with `ast:` then also count what the
+    // parsed code does (src/engines/ast-rules.js), not only how it is spelled.
+    // fileTextBefore: the file before an Edit — then only what it ADDS counts.
+    const { content, type, filePath, fileText, fileTextBefore } = options;
     const suggestions = [];
+
+    const astChecks = [...new Set([...this.constraints.values()]
+      .filter((c) => c.enabled && c.ast).map((c) => c.ast))];
+    let astCounts = {};
+    if (typeof fileText === 'string' && astChecks.length > 0) {
+      astCounts = countAst(fileText, filePath, astChecks);
+      if (typeof fileTextBefore === 'string') {
+        const was = countAst(fileTextBefore, filePath, astChecks);
+        for (const c of astChecks) astCounts[c] = Math.max(0, (astCounts[c] || 0) - (was[c] || 0));
+      }
+    }
 
     // Debug logging
     logger.info(`Checking constraints for ${filePath}`, {
@@ -161,14 +177,18 @@ export class ConstraintEngine {
         // treating it as content made path rules match file bodies instead.
         const pathOnly = constraint.applies_to === 'file_path' || constraint.applies_to === 'filename';
         const targetText = pathOnly ? (filePath || '') : content;
-        const matches = targetText.match(regex);
+        const regexMatches = targetText.match(regex);
+        const astMatches = !pathOnly && constraint.ast ? (astCounts[constraint.ast] || 0) : 0;
+        const count = Math.max(regexMatches ? regexMatches.length : 0, astMatches);
+        const matches = count > 0 ? { length: count } : null;
 
         logger.debug(`Testing constraint ${id}`, {
           pattern: constraint.pattern,
           appliesTo: constraint.applies_to || 'content',
           targetLength: targetText?.length,
-          matches: matches ? matches.length : 0,
-          firstMatch: matches ? matches[0] : null
+          matches: count,
+          astMatches,
+          firstMatch: regexMatches ? regexMatches[0] : null
         });
 
         if (matches) {
@@ -183,6 +203,10 @@ export class ConstraintEngine {
             severity: constraint.severity,
             matches: matches.length,
             pattern: constraint.pattern,
+            // The parsed code found more than the spelling did (e.g. a computed
+            // or aliased call the regex cannot see) — say so, or the message
+            // shows a pattern that visibly does not match.
+            ...(astMatches > (regexMatches ? regexMatches.length : 0) ? { detected_by: 'ast', ast: constraint.ast } : {}),
             file_path: filePath,
             detected_at: new Date().toISOString()
           };
