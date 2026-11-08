@@ -21,7 +21,7 @@
 
 import { writeSync } from 'fs';
 import { readTranscriptTail, overridesFromTranscript, activeSkillsFromTranscript } from './session-transcript.js';
-import { boxGuardConfig, settleWithGrants } from './box-grants.js';
+import { boxGuardConfig, recordBoxCall, settleWithGrants } from './box-grants.js';
 import { toClaudeCall } from './agent-adapters.js';
 
 /** Tools that cannot change anything; allowed even when the guard is broken. */
@@ -104,6 +104,7 @@ async function processToolHook() {
   }
 
   const box = boxGuardConfig();
+  if (box) recordBoxCall({ agent, toolName, params: toolParams });
   const entries = readTranscriptTail(hookInput.transcript_path);
   const constraintOverride = box ? [] : overridesFromTranscript(entries);
 

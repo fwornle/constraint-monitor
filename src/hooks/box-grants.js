@@ -24,13 +24,16 @@
  * Plan: coding/.planning/guardrail-hardening.md (Phase 1, item 4).
  */
 
-import { readFileSync } from 'fs';
+import { appendFileSync, readFileSync } from 'fs';
 import { hostname } from 'os';
 import { join } from 'path';
+import { fileURLToPath } from 'url';
 
 /** Where grants.mjs sits: the coding repo on the host, /opt/coding-guard in the box. */
 const GRANTS_LIB = new URL('../../../../lib/guard/grants.mjs', import.meta.url);
 const HTTP_TIMEOUT_MS = 5000;
+/** The hook's log dir (1777 in the box image). */
+const CALL_LOG = fileURLToPath(new URL('../../logs/box-calls.jsonl', import.meta.url));
 
 /** Box-mode settings, or null when the hook runs on the host. */
 export function boxGuardConfig(env = process.env) {
@@ -53,6 +56,19 @@ export function callExcerpt(toolName, params = {}) {
 /** The file a grant is bound to; null (= any file) for tools without one. */
 export function callFile(params = {}) {
   return params.file_path || params.notebook_path || null;
+}
+
+/**
+ * One line per tool call the guard saw in the box: the red-team test
+ * (coding/scripts/redteam-box.mjs) tells "the agent declined" from "the
+ * guard stopped it" by it. The agent can write this file, so it is only ever
+ * evidence that the agent ACTED — deleting it makes a cell report no result,
+ * never a pass. Best effort: a record is never a reason to block.
+ */
+export function recordBoxCall({ agent, toolName, params }, file = CALL_LOG) {
+  try {
+    appendFileSync(file, `${JSON.stringify({ t: new Date().toISOString(), agent, tool: toolName, file: callFile(params) })}\n`);
+  } catch { /* unwritable log: no record */ }
 }
 
 class GuardUnavailable extends Error {}
