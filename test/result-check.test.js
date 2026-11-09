@@ -9,12 +9,12 @@
 
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { beforeCall, afterCall, rulesAddedBy } from '../src/hooks/result-check.js';
+import { beforeCall, afterCall, rulesAddedBy, lockAbandoned, stateDir, READ_ONLY_TOOLS } from '../src/hooks/result-check.js';
 import { getEnforcer } from '../src/hooks/real-time-constraint-hook.js';
 
 process.env.CLAUDE_CODE_HOOK = 'true';
@@ -260,5 +260,86 @@ describe('the hooks end to end (stdin JSON, as an agent runs them)', () => {
     const post = run(POST, { tool_name: 'Bash', tool_input: { command: 'x' }, cwd: ws.root }, { CODING_GUARD_RESULTS: '' });
     assert.strictEqual(post.status, 0);
     assert.ok(fs.existsSync(path.join(ws.root, 'NOTES.md')));
+  });
+});
+
+describe('the state lock survives a killed hook (2026-11-09)', () => {
+  // The agent harness kills a hook on its timeout (30 s); `finally` never runs,
+  // so the lock and the snapshot's temp index outlived it and every later call
+  // waited 20 s and failed closed until the lock aged out at 60 s.
+  const deadPid = () => spawnSync(process.execPath, ['-e', '0']).pid;
+  const host = os.hostname();
+
+  test('a lock whose holder is dead on this host is abandoned at once; a live holder is not', () => {
+    const dir = fs.mkdtempSync(path.join(TMP, 'lock-'));
+    const lock = path.join(dir, 'lock');
+    fs.writeFileSync(lock, `${deadPid()} ${host}`);
+    assert.strictEqual(lockAbandoned(lock), true);
+    fs.writeFileSync(lock, `${process.pid} ${host}`);
+    assert.strictEqual(lockAbandoned(lock), false);
+  });
+
+  test('a lock from another host, or not written yet, falls back to its age', () => {
+    const dir = fs.mkdtempSync(path.join(TMP, 'lock-'));
+    const lock = path.join(dir, 'lock');
+    fs.writeFileSync(lock, `1 some-other-host`);
+    assert.strictEqual(lockAbandoned(lock), false);
+    assert.strictEqual(lockAbandoned(lock, { now: Date.now() + 61_000 }), true);
+    fs.writeFileSync(lock, '');
+    assert.strictEqual(lockAbandoned(lock), false);
+    assert.strictEqual(lockAbandoned(path.join(dir, 'gone')), false);
+  });
+
+  test('a call after a killed hook proceeds at once and sweeps its orphaned index', async () => {
+    const ws = repo();
+    const dir = stateDir(ws.root, ws.stateRoot);
+    fs.mkdirSync(dir, { recursive: true });
+    const dead = deadPid();
+    fs.writeFileSync(path.join(dir, 'lock'), `${dead} ${host}`);
+    fs.writeFileSync(path.join(dir, `index-${dead}-0877fcce`), 'x');
+    fs.writeFileSync(path.join(dir, `index-${process.pid}-0877fcce`), 'x'); // a live snapshot's: kept
+    const t = Date.now();
+    const { post } = await callRun(ws, () => {});
+    assert.ok(Date.now() - t < 10_000, `took ${Date.now() - t} ms`);
+    assert.strictEqual(post.message, '');
+    assert.ok(!fs.existsSync(path.join(dir, 'lock')));
+    assert.ok(!fs.existsSync(path.join(dir, `index-${dead}-0877fcce`)));
+    assert.ok(fs.existsSync(path.join(dir, `index-${process.pid}-0877fcce`)));
+  });
+
+  test('end to end: a hook SIGKILLed while holding the lock does not block the next call', async () => {
+    const ws = repo();
+    const dir = stateDir(ws.root, ws.stateRoot);
+    // Child: register a call (sets the base), change a file, then judge it with
+    // an enforcer that never answers — it holds the lock until killed.
+    const child = spawn(process.execPath, ['--input-type=module', '-e', `
+      import fs from 'node:fs';
+      import { beforeCall, afterCall } from ${JSON.stringify(new URL('../src/hooks/result-check.js', import.meta.url).href)};
+      const hang = { loadConfig: () => new Promise(() => { setInterval(() => {}, 1000); }) };
+      const a = { cwd: ${JSON.stringify(ws.root)}, key: 'c', toolName: 'Bash', params: { command: 'x' }, stateRoot: ${JSON.stringify(ws.stateRoot)} };
+      await beforeCall({ ...a, enforcer: hang });
+      fs.writeFileSync(${JSON.stringify(path.join(ws.root, 'new.md'))}, 'x');
+      await afterCall({ ...a, enforcer: hang });
+    `], { stdio: 'ignore' });
+    const lock = path.join(dir, 'lock');
+    for (let i = 0; i < 200 && !(fs.existsSync(lock) && fs.readFileSync(lock, 'utf8') === `${child.pid} ${host}`); i++) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    assert.strictEqual(fs.readFileSync(lock, 'utf8'), `${child.pid} ${host}`, 'the child holds the lock and names itself');
+    const exited = child.exitCode !== null || child.signalCode !== null ? Promise.resolve() : new Promise((r) => child.once('exit', r));
+    child.kill('SIGKILL');
+    await exited;
+    assert.ok(fs.existsSync(lock), 'the killed hook left its lock behind');
+    const t = Date.now();
+    await callRun(ws, () => {});
+    assert.ok(Date.now() - t < 10_000, `took ${Date.now() - t} ms`);
+    assert.ok(!fs.existsSync(lock));
+  });
+});
+
+describe('read-only tools skip the result check', () => {
+  test('tools that cannot write are listed; writers and unknown (MCP) tools are not', () => {
+    for (const t of ['Read', 'Grep', 'Glob', 'Agent', 'TaskStop', 'WebFetch', 'Skill']) assert.ok(READ_ONLY_TOOLS.has(t), t);
+    for (const t of ['Bash', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'Monitor', 'mcp__x__y']) assert.ok(!READ_ONLY_TOOLS.has(t), t);
   });
 });

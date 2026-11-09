@@ -17,12 +17,11 @@
  * next pre-tool hook judges it again (and blocks if it still cannot).
  */
 
-import { resultCheckEnabled } from './result-check.js';
+import { resultCheckEnabled, READ_ONLY_TOOLS } from './result-check.js';
 import { boxGuardConfig, settleWithGrants } from './box-grants.js';
 import { toClaudeCall } from './agent-adapters.js';
 import { readTranscriptTail, overridesFromTranscript, activeSkillsFromTranscript } from './session-transcript.js';
 
-const READ_ONLY_TOOLS = new Set(['Read', 'Grep', 'Glob', 'LS', 'ToolSearch', 'TodoWrite']);
 
 async function readStdin() {
   if (process.stdin.isTTY === true) return '';
