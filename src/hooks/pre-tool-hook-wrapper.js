@@ -23,10 +23,8 @@ import { writeSync } from 'fs';
 import { readTranscriptTail, overridesFromTranscript, activeSkillsFromTranscript } from './session-transcript.js';
 import { boxGuardConfig, recordBoxCall, settleWithGrants } from './box-grants.js';
 import { toClaudeCall } from './agent-adapters.js';
-import { resultCheckEnabled } from './result-check.js';
+import { resultCheckEnabled, READ_ONLY_TOOLS } from './result-check.js';
 
-/** Tools that cannot change anything; allowed even when the guard is broken. */
-const READ_ONLY_TOOLS = new Set(['Read', 'Grep', 'Glob', 'LS', 'ToolSearch', 'TodoWrite']);
 
 const GUARD_BROKEN_HINT =
   'The constraint guard itself failed, so this call is blocked (fail-closed).\n' +

@@ -40,9 +40,10 @@
 import { execFileSync } from 'child_process';
 import { createHash, randomBytes } from 'crypto';
 import {
-  chmodSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readFileSync,
-  renameSync, rmSync, statSync, unlinkSync, writeFileSync,
+  chmodSync, closeSync, copyFileSync, existsSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync,
+  renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync,
 } from 'fs';
+import { hostname } from 'os';
 import { dirname, isAbsolute, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
 
@@ -52,7 +53,21 @@ export const MAX_FILE_BYTES = 1_000_000;
 /** An in-flight call older than this never got its after-call event (crash, denial). */
 export const STALE_MS = 30 * 60_000;
 const LOCK_WAIT_MS = 20_000;
+/** Backstop only: a lock whose holder we cannot check (another host) is stale after this. */
 const LOCK_STALE_MS = 60_000;
+
+/**
+ * Tools that cannot change the workspace. Their calls skip the result check
+ * (no snapshot — about 1.5 s per hook on a large repo) and are allowed even
+ * when the guard itself fails. Anything not listed (MCP tools included) is
+ * checked: fail-closed. `Agent` writes nothing itself; its subagent's calls
+ * run their own hooks.
+ */
+export const READ_ONLY_TOOLS = new Set([
+  'Read', 'Grep', 'Glob', 'LS', 'ToolSearch', 'TodoWrite',
+  'WebFetch', 'WebSearch', 'AskUserQuestion', 'Skill',
+  'Agent', 'Task', 'TaskStop', 'TaskOutput', 'ListAgents', 'SendMessage',
+]);
 
 /** Tools whose own target file the per-call check already judged in full. */
 const FILE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
@@ -163,24 +178,89 @@ function writeState(dir, state) {
   renameSync(tmp, join(dir, 'state.json'));
 }
 
+/** Is `pid` a live process on this host? EPERM = alive but not ours. */
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err.code === 'EPERM';
+  }
+}
+
+/**
+ * Is the lock abandoned? The holder writes "<pid> <host>" into it. A hook the
+ * agent harness kills on its timeout (30 s) never runs its `finally`, so the
+ * lock outlives it: on the same host a dead pid frees it at once. A lock from
+ * another host (or one not written yet / unreadable) falls back to its age.
+ */
+export function lockAbandoned(lock, { now = Date.now(), host = hostname(), alive = pidAlive } = {}) {
+  let text = '';
+  let mtime;
+  try {
+    mtime = statSync(lock).mtimeMs;
+    text = readFileSync(lock, 'utf8');
+  } catch {
+    return false; // gone already: just retry
+  }
+  const m = /^(\d+) (\S+)$/.exec(text.trim());
+  if (m && m[2] === host) return !alive(Number(m[1]));
+  return now - mtime > LOCK_STALE_MS;
+}
+
+/**
+ * Temp indexes of snapshots whose process died mid-way (killed on the hook
+ * timeout) — named index-<pid>-<rand>, ~0.5 MB each on a large repo.
+ */
+function sweepOrphanIndexes(dir, alive = pidAlive) {
+  let names = [];
+  try { names = readdirSync(dir); } catch { return; }
+  for (const name of names) {
+    const m = /^index-(\d+)-[0-9a-f]+$/.exec(name);
+    if (m && !alive(Number(m[1]))) rmSync(join(dir, name), { force: true });
+  }
+}
+
+/**
+ * Remove an abandoned lock without racing another waiter that judged it the
+ * same way and has already taken a fresh one: move it aside atomically, and if
+ * what we moved is NOT abandoned (someone's live lock), put it back — link()
+ * fails when the slot is taken again, so a restore never clobbers.
+ */
+function reapLock(lock) {
+  const aside = `${lock}.reap.${process.pid}.${randomBytes(3).toString('hex')}`;
+  try { renameSync(lock, aside); } catch { return; }
+  try {
+    if (!lockAbandoned(aside)) {
+      try { linkSync(aside, lock); } catch { /* slot taken again: that holder wins */ }
+    }
+  } finally {
+    rmSync(aside, { force: true });
+  }
+}
+
 /** Parallel calls run their hooks at the same time; the state is one file. */
 async function withLock(dir, fn) {
   const lock = join(dir, 'lock');
   const start = Date.now();
   for (;;) {
     try {
-      closeSync(openSync(lock, 'wx'));
+      const fd = openSync(lock, 'wx');
+      try { writeSync(fd, `${process.pid} ${hostname()}`); } finally { closeSync(fd); }
       break;
     } catch (err) {
       if (err.code !== 'EEXIST') throw err;
-      try {
-        if (Date.now() - statSync(lock).mtimeMs > LOCK_STALE_MS) rmSync(lock, { force: true });
-      } catch { /* gone already */ }
+      if (lockAbandoned(lock)) {
+        reapLock(lock);
+        continue;
+      }
       if (Date.now() - start > LOCK_WAIT_MS) throw new Error(`result check: state lock busy (${lock})`);
       await new Promise((r) => setTimeout(r, 50));
     }
   }
   try {
+    sweepOrphanIndexes(dir);
     return await fn();
   } finally {
     rmSync(lock, { force: true });
